@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -115,9 +116,16 @@ private object Catalog {
         }.distinctBy { it.id }.sortedWith(compareByDescending<Chapter> { it.number.toDoubleOrNull() ?: -1.0 }.thenByDescending { it.number })
     }
     fun pages(bookId: String, chapterId: String): List<String> {
-        val raw = decode(html("$base/reader/${encPath(bookId)}/${encPath(chapterId)}"))
-        val regex = Regex("https://img\\.mangatek\\.com/[^\\\"'\\s<>\\[\\]\\\\]+?\\.(?:webp|jpg|jpeg|png)(?:\\?[^\\\"'\\s<>\\[\\]\\\\]*)?", RegexOption.IGNORE_CASE)
-        return regex.findAll(raw).map { it.value.trimEnd(',', ';') }.distinct().toList()
+        // React/Next streaming payload contains escaped URLs and HTML entities.
+        val raw = html("$base/reader/${encPath(bookId)}/${encPath(chapterId)}")
+        val normalized = raw
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003d", "=")
+        val pattern = Regex("https://img\\.mangatek\\.com/[^\\\"'\\s<>\\[\\]\\\\]+?\\.(?:webp|jpg|jpeg|png)(?:\\?[^\\\"'\\s<>\\[\\]\\\\]*)?", RegexOption.IGNORE_CASE)
+        return pattern.findAll(normalized).map { it.value.trimEnd(',', ';') }.distinct().toList()
     }
 }
 class MainActivity : ComponentActivity() {
