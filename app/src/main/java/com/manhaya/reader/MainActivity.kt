@@ -44,74 +44,82 @@ private val DarkBg = Color(0xFF0C0E18)
 private val DarkCard = Color(0xFF1A1D2B)
 private data class SourceInfo(val id: String, val name: String, val language: String, val active: Boolean)
 private val sources = listOf(
-    SourceInfo("mangadex", "MangaDex", "AR", true),
     SourceInfo("3asq", "3asq · العاشق", "AR", false),
     SourceInfo("azorafly", "AzoraFly", "AR", false),
     SourceInfo("asura", "Asura Scans", "EN", false),
     SourceInfo("vortex", "Vortex Scans", "EN", false),
     SourceInfo("mangalik", "MangaLik", "AR", false),
     SourceInfo("hijala", "Hijala", "AR", false),
-    SourceInfo("mangatek", "MangaTek", "AR", false),
+    SourceInfo("mangatek", "MangaTek", "AR", true),
     SourceInfo("kenmanga", "KenManga", "AR", false),
     SourceInfo("kingofshojo", "King of Shojo", "EN", false),
     SourceInfo("lagoon", "Lagoon Scans", "EN", false),
     SourceInfo("olympus", "Olympus Staff", "EN", false),
     SourceInfo("mangatuk", "MangaTuk", "AR", false)
 )
-private data class Book(val id: String, val name: String, val desc: String, val cover: String?, val source: String = "mangadex")
+private data class Book(val id: String, val name: String, val desc: String, val cover: String?, val source: String = "mangatek")
 private data class Chapter(val id: String, val number: String, val title: String)
 private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 private fun localized(o: JSONObject): String {
     for (k in listOf("ar", "en", "ko-ro", "ja-ro")) o.optString(k).takeIf { it.isNotBlank() }?.let { return it }
     val keys = o.keys(); return if (keys.hasNext()) o.optString(keys.next()) else ""
 }
-private fun json(url: String): JSONObject {
-    val c = URL(url).openConnection() as HttpURLConnection
-    c.connectTimeout = 12000; c.readTimeout = 20000
-    c.setRequestProperty("User-Agent", "Manhaya/0.4 (Android)")
-    c.setRequestProperty("Accept", "application/json")
-    try {
-        if (c.responseCode !in 200..299) error("HTTP ${c.responseCode}")
-        return JSONObject(c.inputStream.bufferedReader().use { it.readText() })
-    } finally { c.disconnect() }
-}
 private object Catalog {
-    private const val api = "https://api.mangadex.org"
+    private const val base = "https://mangatek.com"
+    private fun html(url: String): String {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.connectTimeout = 15000; c.readTimeout = 25000
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+        c.setRequestProperty("Accept", "text/html")
+        try {
+            if (c.responseCode !in 200..299) error("MangaTek HTTP ${c.responseCode}")
+            return c.inputStream.bufferedReader().use { it.readText() }
+        } finally { c.disconnect() }
+    }
+    private fun decode(s: String): String = android.text.Html.fromHtml(s, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
+    private fun clean(s: String): String = decode(s.replace(Regex("<[^>]*>"), " ")).replace(Regex("\\s+"), " ").trim()
+    private fun paths(html: String, prefix: String): List<String> =
+        Regex("href=[\\\"']([^\\\"']*/$prefix/[^\\\"'#?]+)[\\\"']", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.groupValues[1].substringBefore('?').trimEnd('/') }.distinct().toList()
+    private fun absolute(path: String): String = URL(URL(base), path).toString()
+    private fun slug(path: String): String = path.substringAfterLast('/').substringBefore('?')
+    private fun meta(html: String, key: String): String {
+        val p = Regex("<meta[^>]+(?:property|name)=[\\\"']${Regex.escape(key)}[\\\"'][^>]*>", RegexOption.IGNORE_CASE).find(html)?.value ?: return ""
+        return decode(Regex("content=[\\\"']([^\\\"']*)[\\\"']", RegexOption.IGNORE_CASE).find(p)?.groupValues?.get(1) ?: "")
+    }
+    private fun book(path: String, page: String? = null): Book {
+        val id = slug(path)
+        val title = page?.let { meta(it, "og:title").substringBefore(" | ").substringBefore(" - MangaTek") }?.takeIf { it.isNotBlank() }
+            ?: id.replace('-', ' ').replaceFirstChar { it.uppercase() }
+        val cover = page?.let { meta(it, "og:image") }?.takeIf { it.startsWith("http") }
+        val desc = page?.let { meta(it, "og:description") } ?: ""
+        return Book(id, title, desc, cover, "mangatek")
+    }
     fun books(q: String): List<Book> {
-        val url = "$api/manga?limit=36&includes[]=cover_art&availableTranslatedLanguage[]=ar&contentRating[]=safe&order[latestUploadedChapter]=desc" +
-            (if (q.isBlank()) "" else "&title=${enc(q)}")
-        val arr = json(url).getJSONArray("data")
-        return (0 until arr.length()).map { i ->
-            val obj = arr.getJSONObject(i); val a = obj.getJSONObject("attributes"); val id = obj.getString("id")
-            val rels = obj.optJSONArray("relationships"); var filename: String? = null
-            if (rels != null) for (j in 0 until rels.length()) {
-                val rel = rels.getJSONObject(j)
-                if (rel.optString("type") == "cover_art") filename = rel.optJSONObject("attributes")?.optString("fileName")
-            }
-            Book(id, localized(a.getJSONObject("title")), localized(a.optJSONObject("description") ?: JSONObject()),
-                filename?.takeIf { it.isNotBlank() }?.let { "https://uploads.mangadex.org/covers/$id/$it.256.jpg" })
+        val raw = html("$base/manga-list")
+        val entries = paths(raw, "manga").distinctBy { slug(it) }
+        // MangaTek currently exposes catalog links in server-rendered HTML.
+        // Search filters this fetched page; site-wide search/pagination needs a separate adapter.
+        val selected = if (q.isBlank()) entries.take(18) else entries.filter { it.substringAfterLast('/').replace('-', ' ').contains(q, ignoreCase = true) }.take(18)
+        return selected.map { path ->
+            try { book(path, html(absolute(path))) } catch (_: Exception) { book(path) }
         }
     }
+    fun details(b: Book): Book = book("/manga/${b.id}", html("$base/manga/${encPath(b.id)}"))
+    private fun encPath(s: String) = enc(s).replace("+", "%20")
     fun chapters(id: String): List<Chapter> {
-        val out = mutableListOf<Chapter>(); var offset = 0
-        while (offset < 500) {
-            val j = json("$api/chapter?manga=$id&translatedLanguage[]=ar&limit=100&offset=$offset&order[chapter]=desc&contentRating[]=safe")
-            val a = j.getJSONArray("data")
-            for (i in 0 until a.length()) {
-                val obj = a.getJSONObject(i); val attr = obj.getJSONObject("attributes")
-                out.add(Chapter(obj.getString("id"), attr.optString("chapter").ifBlank { "?" }, attr.optString("title")))
-            }
-            offset += a.length(); if (a.length() == 0 || offset >= j.optInt("total", offset)) break
-        }
-        return out.distinctBy { it.id }
+        val raw = html("$base/manga/${encPath(id)}")
+        return paths(raw, "reader").filter { it.contains("/reader/$id/") }.map { path ->
+            val number = path.substringAfter("/reader/$id/").substringBefore('/')
+            Chapter(number, number, "")
+        }.distinctBy { it.id }.sortedWith(compareByDescending<Chapter> { it.number.toDoubleOrNull() ?: -1.0 }.thenByDescending { it.number })
     }
-    fun pages(id: String): List<String> {
-        val j = json("$api/at-home/server/$id"); val ch = j.getJSONObject("chapter")
-        val a = ch.getJSONArray("dataSaver")
-        return (0 until a.length()).map { "${j.getString("baseUrl")}/data-saver/${ch.getString("hash")}/${a.getString(it)}" }
+    fun pages(bookId: String, chapterId: String): List<String> {
+        val raw = decode(html("$base/reader/${encPath(bookId)}/${encPath(chapterId)}"))
+        val regex = Regex("https://img\\.mangatek\\.com/[^\\\"'\\s<>\\[\\]\\\\]+?\\.(?:webp|jpg|jpeg|png)(?:\\?[^\\\"'\\s<>\\[\\]\\\\]*)?", RegexOption.IGNORE_CASE)
+        return regex.findAll(raw).map { it.value.trimEnd(',', ';') }.distinct().toList()
     }
 }
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,9 +146,9 @@ private fun Manhaya() {
     var loading by remember { mutableStateOf(false) }
     var issue by remember { mutableStateOf<String?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
-    val saved = remember { mutableStateListOf<String>().apply { addAll(prefs.getStringSet("online_favorites", emptySet()) ?: emptySet()) } }
+    val saved = remember { mutableStateListOf<String>().apply { addAll(prefs.getStringSet("mangatek_favorites", emptySet()) ?: emptySet()) } }
     val cached = remember { mutableStateMapOf<String, Book>().apply {
-        try { val a = JSONArray(prefs.getString("online_book_cache", "[]"))
+        try { val a = JSONArray(prefs.getString("mangatek_book_cache", "[]"))
             for (i in 0 until a.length()) { val o = a.getJSONObject(i); put(o.getString("id"), Book(o.getString("id"), o.getString("name"), o.optString("desc"), o.optString("cover").takeIf { it.isNotBlank() })) }
         } catch (_: Exception) { }
     } }
@@ -148,7 +156,7 @@ private fun Manhaya() {
         list.forEach { cached[it.id] = it }
         val a = JSONArray()
         cached.values.take(250).forEach { b -> a.put(JSONObject().put("id", b.id).put("name", b.name).put("desc", b.desc).put("cover", b.cover ?: "")) }
-        prefs.edit().putString("online_book_cache", a.toString()).apply()
+        prefs.edit().putString("mangatek_book_cache", a.toString()).apply()
     }
     var enabledExtras by remember { mutableStateOf(prefs.getStringSet("enabled_extra_sources", emptySet()) ?: emptySet()) }
     val ar = lang == "ar"
@@ -164,7 +172,7 @@ private fun Manhaya() {
         loading = true
         try {
             when {
-                current != null -> pages = withContext(Dispatchers.IO) { Catalog.pages(current!!.id) }
+                current != null -> pages = withContext(Dispatchers.IO) { Catalog.pages(selected!!.id, current!!.id) }
                 selected != null -> chapters = withContext(Dispatchers.IO) { Catalog.chapters(selected!!.id) }
                 tab == 1 -> { results = withContext(Dispatchers.IO) { Catalog.books(search.trim()) }; rememberBooks(results) }
                 tab == 0 -> { books = withContext(Dispatchers.IO) { Catalog.books("") }; rememberBooks(books) }
@@ -220,13 +228,13 @@ private fun Manhaya() {
                                     Cover(book.cover, Modifier.width(125.dp).height(174.dp))
                                     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                                         Text(book.name, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                                        AssistChip(onClick = {}, label = { Text("MangaDex · AR") })
+                                        AssistChip(onClick = {}, label = { Text("MangaTek · AR") })
                                         Text(t("فصول مترجمة للعربية", "Arabic-translated chapters"), color = muted, fontSize = 12.sp)
                                     }
                                 } }
                                 item { Text(book.desc.ifBlank { t("لا يوجد وصف", "No description") }.take(750), color = muted, fontSize = 13.sp) }
                                 item { Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                                    Button(onClick = { if (book.id in saved) saved.remove(book.id) else saved.add(book.id); prefs.edit().putStringSet("online_favorites", saved.toSet()).apply() }) {
+                                    Button(onClick = { if (book.id in saved) saved.remove(book.id) else saved.add(book.id); prefs.edit().putStringSet("mangatek_favorites", saved.toSet()).apply() }) {
                                         Icon(if (book.id in saved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder, null); Spacer(Modifier.width(6.dp)); Text(t("مكتبتي", "Library"))
                                     }
                                     if (chapters.isNotEmpty()) OutlinedButton(onClick = { current = chapters.last(); prefs.edit().putString("last_${book.id}", current!!.id).apply() }) { Text(t("ابدأ القراءة", "Start reading")) }
@@ -252,14 +260,14 @@ private fun Manhaya() {
                             item { Text(t("تصفّح المانهوا", "Explore manhwa"), fontSize = 22.sp, fontWeight = FontWeight.Bold) }
                             items(books) { b -> BookRow(b, surface, muted) { selected = b } }
                             if (books.isEmpty() && !loading && issue == null) item { Empty(t("ما في نتائج حالياً", "No titles yet"), muted) }
-                            item { Text(t("المصدر المتصل حالياً: MangaDex · العربية. باقي المصادر مسجّلة بانتظار ربطها.", "Connected: MangaDex Arabic. Other sources await integration."), color = muted, fontSize = 11.sp) }
+                            item { Text(t("المصدر الأساسي: MangaTek · العربية. باقي المصادر بانتظار ربطها.", "Primary source: MangaTek Arabic. Other sources await integration."), color = muted, fontSize = 11.sp) }
                         }
                         tab == 1 -> Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Heading(t("اكتشف", "Discover"), t("بحث موحّد عبر المصادر المتصلة", "Search connected sources"), muted)
                             OutlinedTextField(value = search, onValueChange = { search = it }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                                 placeholder = { Text(t("ابحث عن مانهوا", "Search titles")) }, leadingIcon = { Icon(Icons.Default.Search, null) },
                                 trailingIcon = { if (search.isNotBlank()) IconButton(onClick = { search = "" }) { Icon(Icons.Default.Close, null) } })
-                            Text(t("المصدر المتصل: MangaDex", "Connected source: MangaDex"), fontSize = 12.sp, color = muted)
+                            Text(t("المصدر الأساسي: MangaTek", "Primary source: MangaTek"), fontSize = 12.sp, color = muted)
                             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 items(results) { b -> BookRow(b, surface, muted) { selected = b } }
                                 if (results.isEmpty() && !loading && issue == null) item { Empty(t("ما لقينا نتائج", "No results"), muted) }
@@ -276,7 +284,7 @@ private fun Manhaya() {
                             Empty(t("تنزيل الفصول للاستخدام دون إنترنت مش متاح بهالنسخة", "Offline downloads are not available in this release"), muted)
                         }
                         tab == 4 -> LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                            item { Heading(t("الإعدادات", "Settings"), "Manhaya v0.4", muted) }
+                            item { Heading(t("الإعدادات", "Settings"), "Manhaya v0.5", muted) }
                             item { Text(t("اللغة", "Language"), fontSize = 19.sp, fontWeight = FontWeight.Bold) }
                             item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 FilterChip(selected = ar, onClick = { lang = "ar"; prefs.edit().putString("language", lang).apply() }, label = { Text("العربية") })
@@ -320,8 +328,8 @@ private fun Manhaya() {
             Cover(book.cover, Modifier.width(83.dp).height(115.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(book.name, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(book.desc.ifBlank { "MangaDex" }, color = muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text("MangaDex · AR", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                Text(book.desc.ifBlank { "MangaTek" }, color = muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("MangaTek · AR", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
             }
             Icon(Icons.Default.ChevronRight, null, tint = muted)
         }
