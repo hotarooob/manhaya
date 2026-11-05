@@ -1,5 +1,6 @@
 package com.manhaya.reader
 
+import android.content.Intent
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
@@ -178,7 +179,8 @@ private fun ManhayaApp() {
                             EmptyMessage(label(R.string.downloads_empty), muted)
                         }
                         4 -> Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                            Header(label(R.string.settings), "Manhaya v0.2", muted)
+                            Header(label(R.string.settings), "Manhaya v0.3", muted)
+                            Button(onClick = { ctx.startActivity(Intent(ctx, OnlineReaderActivity::class.java)) }) { Text(if (lang == "ar") "تصفح المانهوا العربية" else "Browse Arabic manhwa") }
                             Text(label(R.string.language), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 FilterChip(selected = lang == "ar", onClick = { lang = "ar"; prefs.edit().putString("language", lang).apply() }, label = { Text(label(R.string.arabic)) })
